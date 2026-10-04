@@ -30,6 +30,10 @@ type IPResource struct {
 	AppID           string
 	NodeGroupID     string
 	EnableTCPPrefL3 bool
+	// Domain is set when the entry comes from the resolved IPs of a domain resource.
+	// The server only accepts such an entry for that domain, not for other hosts that
+	// happen to share the IP (e.g. several sites behind one campus web gateway).
+	Domain string
 }
 
 type DomainResource struct {

@@ -255,7 +255,7 @@ func (c *Client) parseResource(resource []byte) error {
 									c.ipResources = append(c.ipResources, client.IPResource{
 										IPMin: ip, IPMax: ip, PortMin: portMin, PortMax: portMax,
 										Protocol: address.Protocol, AppID: appItem.ID, NodeGroupID: appItem.NodeGroupID,
-										EnableTCPPrefL3: appItem.EnableTCPPrefL3,
+										EnableTCPPrefL3: appItem.EnableTCPPrefL3, Domain: hostStr,
 									})
 									log.DebugPrintf("Add DNS rule: %s -> %s", hostStr, ipStr)
 								} else {

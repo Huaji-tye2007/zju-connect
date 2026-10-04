@@ -819,6 +819,30 @@ func TestMatchTCPIPResourceUsesLastMatchingRule(t *testing.T) {
 	}
 }
 
+func TestMatchTCPIPResourcePrefersIPRangesOverDomainIPs(t *testing.T) {
+	// 202.119.32.33 is a campus web gateway: several domain apps list it as their resolved
+	// IP, and a campus-wide IP range covers it too. A bare-IP request (another site behind
+	// the gateway) must use the IP range app; the domain apps only accept their domain.
+	resources := []client.IPResource{
+		{IPMin: net.IPv4(202, 119, 32, 0), IPMax: net.IPv4(202, 119, 63, 255), PortMin: 1, PortMax: 65535, Protocol: "all", AppID: "campus-range"},
+		{IPMin: net.IPv4(202, 119, 32, 33), IPMax: net.IPv4(202, 119, 32, 33), PortMin: 443, PortMax: 443, Protocol: "all", AppID: "wendian", Domain: "wendian.nju.edu.cn"},
+	}
+	resource, ok := matchTCPIPResource(ipresource.New(resources), &net.TCPAddr{IP: net.IPv4(202, 119, 32, 33), Port: 443}, false)
+	if !ok || resource.AppID != "campus-range" {
+		t.Fatalf("matchTCPIPResource() = (%#v, %t), want campus-range", resource, ok)
+	}
+}
+
+func TestMatchTCPIPResourceFallsBackToDomainIPs(t *testing.T) {
+	resources := []client.IPResource{
+		{IPMin: net.IPv4(1, 2, 3, 4), IPMax: net.IPv4(1, 2, 3, 4), PortMin: 443, PortMax: 443, Protocol: "all", AppID: "pan", Domain: "pan.example.com"},
+	}
+	resource, ok := matchTCPIPResource(ipresource.New(resources), &net.TCPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 443}, false)
+	if !ok || resource.AppID != "pan" {
+		t.Fatalf("matchTCPIPResource() = (%#v, %t), want the domain app as fallback", resource, ok)
+	}
+}
+
 func TestMatchTCPIPResourceRejectsTCPPrefL3(t *testing.T) {
 	resources := []client.IPResource{{
 		IPMin: net.IPv4(10, 0, 0, 1), IPMax: net.IPv4(10, 0, 0, 10), PortMin: 443, PortMax: 443,

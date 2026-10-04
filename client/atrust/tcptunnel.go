@@ -455,6 +455,14 @@ func calcXRequestSig(key []byte, data []byte) string {
 }
 
 func matchTCPIPResource(index *ipresource.Index, addr *net.TCPAddr, ignoreTCPPrefL3 bool) (client.IPResource, bool) {
+	// Without a domain, prefer IP resources of their own over the resolved IPs of a domain
+	// resource: the server rejects a bare IP for a domain app (SOCKS status 0x02) even when
+	// a campus-wide IP range covers the same address.
+	if resource, ok := index.MatchLastWhere(addr.IP, "tcp", addr.Port, func(resource client.IPResource) bool {
+		return !resource.EnableTCPPrefL3 && resource.Domain == ""
+	}); ok {
+		return resource, true
+	}
 	if resource, ok := index.MatchLastWhere(addr.IP, "tcp", addr.Port, func(resource client.IPResource) bool {
 		return !resource.EnableTCPPrefL3
 	}); ok {
