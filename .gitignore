@@ -25,3 +25,4 @@ go.work
 config.toml
 # Local build output
 /zju-connect
+__pycache__/
