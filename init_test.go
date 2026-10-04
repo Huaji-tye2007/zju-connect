@@ -143,6 +143,19 @@ server_address = "vpn.example.com"
 	}
 }
 
+func TestFetchResourceIsNotAConfigKey(t *testing.T) {
+	options, _, err := loadStartupOptions([]string{"-protocol", "atrust", "-fetch-resource", "resource.json"}, func() []string { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.FetchResource != "resource.json" {
+		t.Fatalf("FetchResource = %q, want resource.json", options.FetchResource)
+	}
+	if options.Config.ResourceFile != "" {
+		t.Fatalf("ResourceFile = %q, want empty", options.Config.ResourceFile)
+	}
+}
+
 func TestProtocolServerWorkaround(t *testing.T) {
 	for _, tt := range []struct {
 		name     string

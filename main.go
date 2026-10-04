@@ -180,7 +180,7 @@ func main() {
 		var saveClientDataFunc func(data []byte) error
 		if conf.ClientDataFile != "" {
 			saveClientDataFunc = func(data []byte) error {
-				return os.WriteFile(conf.ClientDataFile, data, 0600)
+				return writeFileAtomic(conf.ClientDataFile, data, 0600)
 			}
 		}
 

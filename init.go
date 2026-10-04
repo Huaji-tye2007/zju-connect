@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/knadh/koanf/v2"
 	"github.com/mythologyli/zju-connect/client/atrust"
 	"github.com/mythologyli/zju-connect/configs"
+	zclog "github.com/mythologyli/zju-connect/log"
 	"github.com/spf13/pflag"
 )
 
@@ -35,6 +37,7 @@ type startupOptions struct {
 	AuthInfo      bool
 	TrustDevice   bool
 	UntrustDevice bool
+	FetchResource string
 }
 
 type collectionKey string
@@ -146,6 +149,7 @@ func newFlagSet(defaults configs.Config) *pflag.FlagSet {
 	flags.Bool("auth-info", false, "Fetch aTrust authentication information, but do not login")
 	flags.Bool("trust-device", false, "Trust the current device for aTrust, but do not connect")
 	flags.Bool("untrust-device", false, "Untrust the current device for aTrust, but do not connect")
+	flags.String("fetch-resource", "", "Save the aTrust client resource to this file using the session in the client data file, but do not connect")
 	return flags
 }
 
@@ -160,12 +164,14 @@ func loadStartupOptions(args []string, environ func() []string) (startupOptions,
 	authInfo, _ := flags.GetBool("auth-info")
 	trustDevice, _ := flags.GetBool("trust-device")
 	untrustDevice, _ := flags.GetBool("untrust-device")
+	fetchResource, _ := flags.GetString("fetch-resource")
 	configFile, _ := flags.GetString("config")
 	options := startupOptions{
 		ShowVersion:   showVersion,
 		AuthInfo:      authInfo,
 		TrustDevice:   trustDevice,
 		UntrustDevice: untrustDevice,
+		FetchResource: fetchResource,
 	}
 	if options.ShowVersion {
 		return options, flags, nil
@@ -339,7 +345,7 @@ func configKeyForFlag(name string) (string, bool) {
 		}
 	}
 	switch name {
-	case "config", "version", "auth-info", "trust-device", "untrust-device":
+	case "config", "version", "auth-info", "trust-device", "untrust-device", "fetch-resource":
 		return "", false
 	case "server":
 		return "server_address", true
@@ -577,6 +583,9 @@ func initialize(args []string) int {
 			fmt.Fprintln(os.Stderr, "Client data file is required for trust/untrust device")
 			return 1
 		}
+		if conf.DebugDump {
+			zclog.EnableDebug()
+		}
 		clientData, err := os.ReadFile(conf.ClientDataFile)
 		if err != nil {
 			log.Printf("Read client data file error: %s", err)
@@ -594,6 +603,36 @@ func initialize(args []string) int {
 		return 0
 	}
 
+	if options.FetchResource != "" {
+		if conf.Protocol != "atrust" {
+			fmt.Fprintln(os.Stderr, "Fetch resource is only supported by the atrust protocol")
+			return 1
+		}
+		if conf.ClientDataFile == "" {
+			fmt.Fprintln(os.Stderr, "Client data file is required for fetch resource")
+			return 1
+		}
+		if conf.DebugDump {
+			zclog.EnableDebug()
+		}
+		clientData, err := os.ReadFile(conf.ClientDataFile)
+		if err != nil {
+			log.Printf("Read client data file error: %s", err)
+			return 1
+		}
+		resource, err := atrust.FetchResource(conf.ServerAddress, conf.ServerPort, clientData, conf.BindInterface, conf.AutoDetectInterface, conf.LocalDNSServer, conf.DebugTLSLogFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Fetch resource error:", err)
+			return 1
+		}
+		if err := writeFileAtomic(options.FetchResource, resource, 0600); err != nil {
+			fmt.Fprintln(os.Stderr, "Save resource error:", err)
+			return 1
+		}
+		log.Printf("Resource saved to %s", options.FetchResource)
+		return 0
+	}
+
 	if err := validateConnectConfig(conf); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		fmt.Fprintln(os.Stderr, "Please see: https://github.com/mythologyli/zju-connect")
@@ -602,4 +641,24 @@ func initialize(args []string) int {
 		return 1
 	}
 	return -1
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }

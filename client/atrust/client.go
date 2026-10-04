@@ -254,7 +254,10 @@ func (c *Client) NewL3Conn() (io.ReadWriteCloser, error) {
 	return tunnel.NewL3Conn()
 }
 
-func SetTrusted(serverAddress string, serverPort int, authData []byte, trusted bool, bindInterface string, autoDetectInterface bool, localDNSServer, debugTLSLogFile string) (err error) {
+// withSavedSession restores the login session stored in authData and runs fn
+// with it. It never performs an interactive login: the saved session must
+// still be valid on the server.
+func withSavedSession(serverAddress string, serverPort int, authData []byte, bindInterface string, autoDetectInterface bool, localDNSServer, debugTLSLogFile string, fn func(sess *auth.Session) error) (err error) {
 	var clientAuthData auth.ClientAuthData
 	if authData != nil {
 		err := json.Unmarshal(authData, &clientAuthData)
@@ -299,24 +302,54 @@ func SetTrusted(serverAddress string, serverPort int, authData []byte, trusted b
 	}); err != nil {
 		return err
 	}
-	result, err := sess.QueryDevice()
-	if err != nil {
-		return err
-	}
+	return fn(sess)
+}
 
-	if trusted {
-		if result.DeviceTrusted {
-			log.Println("Device already trusted, skipping")
-			return nil
+func SetTrusted(serverAddress string, serverPort int, authData []byte, trusted bool, bindInterface string, autoDetectInterface bool, localDNSServer, debugTLSLogFile string) error {
+	return withSavedSession(serverAddress, serverPort, authData, bindInterface, autoDetectInterface, localDNSServer, debugTLSLogFile, func(sess *auth.Session) error {
+		result, err := sess.QueryDevice()
+		if err != nil {
+			return err
 		}
-		return sess.TrustDevice([]string{result.SelfID})
-	} else {
-		if !result.DeviceTrusted {
-			log.Println("Device already untrusted, skipping")
-			return nil
+
+		if trusted {
+			if result.DeviceTrusted {
+				log.Println("Device already trusted, skipping")
+				return nil
+			}
+			return sess.TrustDevice([]string{result.SelfID})
+		} else {
+			if !result.DeviceTrusted {
+				log.Println("Device already untrusted, skipping")
+				return nil
+			}
+			return sess.UntrustDevice([]string{result.SelfID})
 		}
-		return sess.UntrustDevice([]string{result.SelfID})
-	}
+	})
+}
+
+// FetchResource downloads the client resource (the access policy that
+// -resource-file accepts) using the session saved in authData.
+func FetchResource(serverAddress string, serverPort int, authData []byte, bindInterface string, autoDetectInterface bool, localDNSServer, debugTLSLogFile string) (resource []byte, err error) {
+	err = withSavedSession(serverAddress, serverPort, authData, bindInterface, autoDetectInterface, localDNSServer, debugTLSLogFile, func(sess *auth.Session) error {
+		data, err := sess.ClientResource()
+		if err != nil {
+			return err
+		}
+		var re struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(data, &re); err != nil {
+			return fmt.Errorf("parse client resource: %w", err)
+		}
+		if re.Code != 0 {
+			return fmt.Errorf("clientResource failed with code %d: %s", re.Code, re.Message)
+		}
+		resource = data
+		return nil
+	})
+	return resource, err
 }
 
 func (c *Client) Setup(options SetupOptions) ([]byte, error) {
