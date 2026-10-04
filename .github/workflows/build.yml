@@ -122,7 +122,7 @@ jobs:
           gh release upload --clobber ${{ github.event_name == 'release' && github.event.release.tag_name || 'nightly' }} zju-connect-${{ steps.get_filename.outputs.ASSET_NAME }}.zip
 
   update-aur:
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' && github.repository == 'Mythologyli/zju-connect'
     needs: build
     runs-on: ubuntu-latest
     permissions: {}

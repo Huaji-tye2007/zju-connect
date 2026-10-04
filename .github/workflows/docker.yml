@@ -15,6 +15,7 @@ permissions: write-all
 
 jobs:
   build:
+    if: github.repository == 'Mythologyli/zju-connect'
     runs-on: ubuntu-latest
 
     steps:
