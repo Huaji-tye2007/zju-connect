@@ -14,6 +14,14 @@
 
 ### 使用方法
 
+#### 南京大学用户：NJU Connect
+
+本仓库的 [`nju-connect/`](nju-connect/README.md) 提供南大 aTrust 的一键安装脚本、校外自动连接的后台服务，以及 Clash 规则集/脚本生成：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Huaji-tye2007/zju-connect/main/nju-connect/install.sh | bash
+```
+
 #### 使用 GUI 版客户端
 
 + 如果你是来自 ZJU 的用户：
