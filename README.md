@@ -16,10 +16,10 @@
 
 #### 南京大学用户：NJU Connect
 
-南大 aTrust 的一键安装、校外自动连接和 Clash 规则集生成请使用 [NJU Connect](https://github.com/Huaji-tye2007/nju-connect)，它会从本仓库的 Releases 安装 zju-connect：
+南大 aTrust 的一键安装、校外自动连接和 Clash 规则集生成请使用 [NJU Connect CLI](https://github.com/Huaji-tye2007/nju-connect-cli)，它会从本仓库的 Releases 安装 zju-connect：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Huaji-tye2007/nju-connect/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Huaji-tye2007/nju-connect-cli/main/install.sh | bash
 ```
 
 #### 使用 GUI 版客户端
