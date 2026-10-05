@@ -1,0 +1,322 @@
+name: Upstream sync
+
+# Merges Mythologyli/zju-connect into this fork every day.
+#   - clean merge + green tests  -> push main, release v<upstream>-nju.N
+#   - conflict or failing tests  -> Claude Code resolves it and opens a PR
+#   - merging that PR            -> release
+#
+# Secrets:
+#   SYNC_TOKEN               fine-grained PAT for this repo: Contents, Pull requests
+#                            and Workflows read/write. GITHUB_TOKEN can't push
+#                            workflow changes, and releases/PRs it creates don't
+#                            trigger build.yml.
+#   CLAUDE_CODE_OAUTH_TOKEN  from `claude setup-token` (Claude Pro/Max).
+
+on:
+  schedule:
+    - cron: "17 2 * * *" # 10:17 Asia/Shanghai
+  workflow_dispatch:
+    inputs:
+      upstream_repo:
+        description: Repository to merge from
+        default: Mythologyli/zju-connect
+      upstream_ref:
+        description: Branch to merge from
+        default: main
+      dry_run:
+        description: Don't push main or create a release
+        type: boolean
+        default: false
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-sync
+
+env:
+  UPSTREAM_REPO: ${{ inputs.upstream_repo || 'Mythologyli/zju-connect' }}
+  UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+  DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+  SYNC_LABEL: upstream-sync
+
+jobs:
+  sync:
+    if: github.repository != 'Mythologyli/zju-connect' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.merge.outputs.result }}
+      upstream_sha: ${{ steps.merge.outputs.upstream_sha }}
+    steps:
+      - name: Checkout codebase
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Merge upstream
+        id: merge
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch --no-tags "https://github.com/${UPSTREAM_REPO}.git" \
+            "+refs/heads/${UPSTREAM_REF}:refs/remotes/upstream/${UPSTREAM_REF}"
+          UPSTREAM_SHA="$(git rev-parse "refs/remotes/upstream/${UPSTREAM_REF}")"
+          echo "upstream_sha=${UPSTREAM_SHA}" >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD; then
+            echo "main already contains ${UPSTREAM_REPO}@${UPSTREAM_SHA:0:7}."
+            echo "result=uptodate" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          OPEN_PRS="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label "$SYNC_LABEL" --json number --jq length)"
+          if [ "$OPEN_PRS" != "0" ]; then
+            echo "::notice::An upstream-sync PR is still open; waiting for it to be merged."
+            echo "result=pending" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Upstream commits to merge:"
+          git log --oneline --no-merges "HEAD..${UPSTREAM_SHA}"
+
+          if ! git merge --no-ff --no-edit -m "Merge ${UPSTREAM_REPO}@${UPSTREAM_SHA:0:7} into main" "$UPSTREAM_SHA"; then
+            echo "::notice::Merge conflicts in: $(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+            git merge --abort
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! (go build ./... && go vet ./... && go test ./...); then
+            echo "::notice::Merged cleanly but build/vet/test failed."
+            echo "result=tests" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: not pushing main."
+            echo "result=merged-dry" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          echo "result=merged" >> "$GITHUB_OUTPUT"
+
+  resolve:
+    needs: sync
+    if: needs.sync.outputs.result == 'conflict' || needs.sync.outputs.result == 'tests'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout codebase
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Start merge
+        id: start
+        env:
+          UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch --no-tags "https://github.com/${UPSTREAM_REPO}.git" \
+            "+refs/heads/${UPSTREAM_REF}:refs/remotes/upstream/${UPSTREAM_REF}"
+          BRANCH="sync/upstream-$(date -u +%Y%m%d)-${UPSTREAM_SHA:0:7}"
+          git checkout -b "$BRANCH"
+          git merge --no-ff --no-commit "$UPSTREAM_SHA" || true
+
+          {
+            echo "branch=${BRANCH}"
+            d="EOF_$(openssl rand -hex 8)"
+            echo "upstream_log<<$d"; git log --oneline --no-merges "HEAD..${UPSTREAM_SHA}"; echo "$d"
+            echo "fork_log<<$d"; git log --oneline --no-merges "${UPSTREAM_SHA}..HEAD"; echo "$d"
+            echo "conflicts<<$d"; git diff --name-only --diff-filter=U; echo "$d"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve with Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          claude_args: >-
+            --model claude-opus-5-5
+            --max-turns 60
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git add:*),Bash(go build:*),Bash(go vet:*),Bash(go test:*)"
+          prompt: |
+            You are maintaining ${{ github.repository }}, a fork of ${{ env.UPSTREAM_REPO }}
+            (see CLAUDE.md for the architecture). A merge of upstream into the fork's main
+            is in progress in this working tree (`git merge --no-commit`, MERGE_HEAD is set).
+
+            Why you were called: ${{ needs.sync.outputs.result == 'conflict' && 'the merge has conflicts.' || 'the merge is clean, but `go build ./...`, `go vet ./...` or `go test ./...` fails afterwards.' }}
+
+            Conflicted files:
+            ${{ steps.start.outputs.conflicts }}
+
+            New upstream commits being merged:
+            ${{ steps.start.outputs.upstream_log }}
+
+            Fork-only commits that must keep working:
+            ${{ steps.start.outputs.fork_log }}
+
+            Task:
+            1. Read the upstream and fork changes on both sides of every conflict
+               (`git log`, `git show`, `git diff`) and understand what each side intended.
+            2. Resolve every conflict so that both intents survive. Upstream is the source of
+               truth for shared code; re-apply the fork's changes on top of it.
+            3. Rules:
+               - The fork's CI change (commit 7a25bf6) restricts the AUR and Docker publishing
+                 jobs to `github.repository == 'Mythologyli/zju-connect'`. Keep those guards in
+                 every workflow file, including any new upstream publishing job.
+               - Do not delete or weaken tests to make them pass.
+               - Make only the changes the merge needs; no unrelated refactors.
+               - If the intent of a conflict is ambiguous, choose the conservative option and
+                 flag it in the PR description.
+            4. `go build ./...`, `go vet ./...` and `go test ./...` must pass.
+            5. `git add` every file you changed. Do not commit, push or switch branches.
+            6. Write the pull request description to `.sync-pr-body.md` in the repository root
+               (it will not be committed). In Markdown, cover: a short summary of what upstream
+               changed; each conflict or failure, what both sides wanted and how you resolved
+               it; anything uncertain the maintainer should check; and the test results.
+
+      - name: Verify and commit
+        id: verify
+        run: |
+          set -uo pipefail
+          BODY="$RUNNER_TEMP/pr-body.md"
+          if [ -f .sync-pr-body.md ]; then
+            mv .sync-pr-body.md "$BODY"
+            git rm --cached --quiet --ignore-unmatch .sync-pr-body.md
+          else
+            echo "Claude did not write a PR description; see the workflow log." > "$BODY"
+          fi
+
+          PROBLEMS=""
+          UNMERGED="$(git diff --name-only --diff-filter=U)"
+          [ -n "$UNMERGED" ] && PROBLEMS="${PROBLEMS}- Unresolved files: $(echo $UNMERGED)"$'\n'
+          git add -u
+          if git diff --cached --check | grep -q 'conflict marker'; then
+            PROBLEMS="${PROBLEMS}- Conflict markers are still in the staged files"$'\n'
+          fi
+          if ! (go build ./... && go vet ./... && go test ./...); then
+            PROBLEMS="${PROBLEMS}- \`go build/vet/test\` fails"$'\n'
+          fi
+
+          git commit --no-edit --no-verify || exit 1
+
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            if [ -n "$PROBLEMS" ]; then
+              echo "> [!WARNING]"
+              echo "> Automatic verification failed, so this PR is a draft:"
+              echo "$PROBLEMS" | sed 's/^/> /'
+              echo
+            fi
+            cat "$BODY"
+            echo
+            echo "---"
+            echo "Opened by the [upstream sync workflow](${RUN_URL}). Merging it publishes a new release."
+          } > "$RUNNER_TEMP/pr-body-final.md"
+
+          if [ -n "$PROBLEMS" ]; then echo "draft=true" >> "$GITHUB_OUTPUT"; else echo "draft=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          BRANCH: ${{ steps.start.outputs.branch }}
+          DRAFT: ${{ steps.verify.outputs.draft }}
+          REASON: ${{ needs.sync.outputs.result == 'conflict' && 'resolve merge conflicts' || 'fix build after merge' }}
+        run: |
+          set -euo pipefail
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${BRANCH}"
+          gh label create "$SYNC_LABEL" --repo "$GITHUB_REPOSITORY" --color 0E8A16 \
+            --description "Automated upstream merge" --force
+          ARGS=()
+          [ "$DRAFT" = "true" ] && ARGS+=(--draft)
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
+            --title "chore: sync upstream ($(date -u +%F)), ${REASON}" \
+            --label "$SYNC_LABEL" --body-file "$RUNNER_TEMP/pr-body-final.md" "${ARGS[@]}"
+
+  release:
+    needs: sync
+    if: >-
+      always() && github.repository != 'Mythologyli/zju-connect' && (
+        needs.sync.outputs.result == 'merged' ||
+        (github.event_name == 'workflow_dispatch' && inputs.dry_run) ||
+        (github.event_name == 'pull_request' &&
+          github.event.pull_request.merged &&
+          github.event.pull_request.base.ref == 'main' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          contains(github.event.pull_request.labels.*.name, 'upstream-sync'))
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout codebase
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Upstream version tags, to find which upstream release main is based on.
+          git fetch --no-tags "https://github.com/${UPSTREAM_REPO}.git" '+refs/tags/v*:refs/tags/v*'
+
+          if git tag --points-at HEAD | grep -q -- '-nju\.'; then
+            echo "HEAD is already released as $(git tag --points-at HEAD | grep -- '-nju\.')."
+            exit 0
+          fi
+
+          BASE="$(git describe --tags --abbrev=0 --exclude '*-nju.*' --exclude nightly HEAD)"
+          LAST_N="$(git tag -l "${BASE}-nju.*" | sed 's/.*-nju\.//' | grep -E '^[0-9]+$' | sort -n | tail -1 || true)"
+          TAG="${BASE}-nju.$(( ${LAST_N:-0} + 1 ))"
+          PREV="$(git describe --tags --abbrev=0 --match '*-nju.*' HEAD 2>/dev/null || true)"
+
+          NOTES="$RUNNER_TEMP/notes.md"
+          {
+            echo "Based on upstream ${BASE}, synced with ${UPSTREAM_REPO} on $(date -u +%F)."
+            echo
+            echo "## Changes"
+            if [ -n "$PREV" ]; then
+              git log --no-merges --format='- %s (%h)' "${PREV}..HEAD"
+              echo
+              echo "**Full changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}"
+            else
+              git log --no-merges --format='- %s (%h)' -20 HEAD
+            fi
+          } > "$NOTES"
+
+          echo "Next release: ${TAG} at $(git rev-parse --short HEAD)"
+          cat "$NOTES"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: not creating the release."
+            exit 0
+          fi
+
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" \
+            --title "$TAG" --notes-file "$NOTES" --latest
